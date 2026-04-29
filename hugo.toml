@@ -1,0 +1,13 @@
+baseURL = "https://laoxu.github.io/"
+languageCode = "zh-CN"
+hasCJKLanguage = true
+title = "老许的博客"
+theme = "PaperMod"
+
+[params]
+  label = "老许"
+  description = "安全研究 | 技术笔记 | 生活随想"
+  author = "老许"
+
+[build]
+  writeStats = true
