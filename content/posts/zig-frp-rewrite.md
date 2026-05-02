@@ -1,5 +1,5 @@
 ---
-title: "从零用 Zig 重写 FRP：一步一步记录（2026-05-02 更新）"
+title: "从零用 Zig 重写 FRP：一步一步记录（完整版）"
 date: 2026-05-02
 draft: false
 tags: ["zig", "frp", "reverse-proxy", "networking", "tutorial"]
@@ -7,56 +7,53 @@ tags: ["zig", "frp", "reverse-proxy", "networking", "tutorial"]
 
 # 从零用 Zig 重写 FRP：一步一步记录
 
+## 前言
+
 之前写的太简陋了，重新整理一遍，记录从零搭建的完整过程。
+
+**注意：本文基于 Zig 0.17.0-dev，API 可能随版本变化。**
 
 ## 环境准备
 
-### 1. 安装 Zig 0.17.0-dev
-
-Zig 还在快速迭代，0.17 是开发版，API 天天变。我用的是 master 分支的最新构建：
+### 1. 安装 Zig
 
 ```bash
 cd /tmp
 wget https://ziglang.org/builds/zig-x86_64-linux-0.17.0-dev.224+c166c49b1.tar.xz
 tar -xf zig-x86_64-linux-0.17.0-dev.224+c166c49b1.tar.xz
 export PATH=/tmp/zig-x86_64-linux-0.17.0-dev.224+c166c49b1:$PATH
-zig version  # 验证
+zig version
 ```
 
-**坑**：0.17 的标准库和 0.14/0.15 差很多，`std.net`、`std.heap.GeneralPurposeAllocator` 都被重构了。建议用稳定版除非你想踩坑。
-
-### 2. 创建项目目录
+### 2. 创建项目
 
 ```bash
-mkdir -p zig-frp/src
+mkdir -p zig-frp/src/client zig-frp/src/server zig-frp/src/msg zig-frp/src/util
 cd zig-frp
 git init
 ```
 
-## 第一步：最简单的 TCP Server
+## 第一步：Hello World - 最简单的 TCP Server
 
-目标：能跑起来就行，先验证 Zig 环境没问题。
+**目标**：验证 Zig 环境 + 理解 Linux syscall 基本用法
 
-创建 `src/frps_main.zig`：
+`src/server/main.zig`:
 
 ```zig
-//! FRP Server (frps) - 使用原始 Linux syscall
 const std = @import("std");
 const linux = std.os.linux;
 
 const CONTROL_PORT: u16 = 7000;
 
 pub fn main() void {
-    std.debug.print("FRP Server starting on port {}\n", .{CONTROL_PORT});
-
-    // 创建 socket
+    // 创建 socket：IPv4 + TCP
     const sock = @as(linux.fd_t, @intCast(linux.socket(
-        linux.AF.INET,  // IPv4
-        linux.SOCK.STREAM,  // TCP
-        0  // 协议：自动选择
+        linux.AF.INET,
+        linux.SOCK.STREAM,
+        0
     )));
     if (sock < 0) {
-        std.debug.print("[!] socket() failed\n", .{});
+        std.debug.print("[!] socket failed\n", .{});
         return;
     }
     defer _ = linux.close(sock);
@@ -65,19 +62,17 @@ pub fn main() void {
     var addr: linux.sockaddr.in = .{
         .family = linux.AF.INET,
         .port = CONTROL_PORT,
-        .addr = 0,  // 0.0.0.0 监听所有网卡
+        .addr = 0,  // 0.0.0.0
         .zero = [_]u8{0} ** 8,
     };
-    const bind_result = linux.bind(sock, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
-    if (bind_result < 0) {
-        std.debug.print("[!] bind() failed\n", .{});
+    if (linux.bind(sock, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)) < 0) {
+        std.debug.print("[!] bind failed\n", .{});
         return;
     }
 
-    // 开始监听
-    const listen_result = linux.listen(sock, 128);
-    if (listen_result < 0) {
-        std.debug.print("[!] listen() failed\n", .{});
+    // 监听
+    if (linux.listen(sock, 128) < 0) {
+        std.debug.print("[!] listen failed\n", .{});
         return;
     }
 
@@ -93,44 +88,39 @@ pub fn main() void {
         )));
         if (client_fd < 0) continue;
 
-        std.debug.print("[+] New connection\n", .{});
-        // 处理客户端...
+        std.debug.print("[+] New connection from {}\n", .{client_addr.addr});
         _ = linux.close(client_fd);
     }
 }
 ```
 
-编译运行：
-
+**编译运行**:
 ```bash
-zig build-exe -lc -OReleaseSafe src/frps_main.zig --name frps
+zig build-exe -lc -OReleaseSafe src/server/main.zig --name frps
 ./frps
-# 输出: [+] Server listening on port 7000
 ```
 
-**坑 1**：`linux.socket()` 返回 `usize`，不是 `fd_t`，需要 `@as(linux.fd_t, @intCast(...))` 转换。
-
-**坑 2**：`linux.sockaddr.in` 的 `port` 字段需要网络字节序（大端），Zig 会自动帮你转换。
+**关键点**:
+- `linux.socket()` 返回 `usize`，需要 `@as(linux.fd_t, @intCast(...))` 转换
+- `linux.sockaddr.in` 的 `.port` 需要网络字节序（Zig 自动处理）
+- 错误时返回负数，不是 error union
 
 ## 第二步：客户端连接
 
-创建 `src/frpc_main.zig`：
+`src/client/main.zig`:
 
 ```zig
-//! FRP Client (frpc)
 const std = @import("std");
 const linux = std.os.linux;
 
-const SERVER_ADDR = "127.0.0.1";
-const CONTROL_PORT: u16 = 7000;
+const SERVER_PORT: u16 = 7000;
 
 pub fn main() void {
-    // 创建 socket
     const sock = @as(linux.fd_t, @intCast(linux.socket(
         linux.AF.INET, linux.SOCK.STREAM, 0
     )));
     if (sock < 0) {
-        std.debug.print("[!] socket() failed\n", .{});
+        std.debug.print("[!] socket failed\n", .{});
         return;
     }
     defer _ = linux.close(sock);
@@ -138,24 +128,22 @@ pub fn main() void {
     // 连接服务器
     var addr: linux.sockaddr.in = .{
         .family = linux.AF.INET,
-        .port = CONTROL_PORT,
-        .addr = @as(u32, 0x0100007f),  // 127.0.0.1 大端表示
+        .port = SERVER_PORT,
+        .addr = @as(u32, 0x0100007f),  // 127.0.0.1 大端
         .zero = [_]u8{0} ** 8,
     };
-    const conn_result = linux.connect(sock, @ptrCast(&addr), @sizeOf(linux.sockaddr.in));
-    if (conn_result < 0) {
-        std.debug.print("[!] connect() failed\n", .{});
+    if (linux.connect(sock, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)) < 0) {
+        std.debug.print("[!] connect failed\n", .{});
         return;
     }
 
-    std.debug.print("[+] Connected to {}:{}\n", .{SERVER_ADDR, CONTROL_PORT});
+    std.debug.print("[+] Connected to 127.0.0.1:{}\n", .{SERVER_PORT});
 }
 ```
 
-编译运行：
-
+**测试**:
 ```bash
-zig build-exe -lc -OReleaseSafe src/frpc_main.zig --name frpc
+zig build-exe -lc -OReleaseSafe src/client/main.zig --name frpc
 ./frps &  # 后台运行服务端
 ./frpc    # 客户端连接
 ```
@@ -163,20 +151,22 @@ zig build-exe -lc -OReleaseSafe src/frpc_main.zig --name frpc
 ## 第三步：自定义消息协议
 
 FRP 用的是 Length-prefixed 协议：
-- 1 字节：消息类型（如 'o' 表示 Login）
+- 1 字节：消息类型（如 `'o'` = Login）
 - 4 字节：大端长度
 - N 字节：JSON payload
 
-创建 `src/msg.zig` 定义消息类型：
+`src/msg/msg.zig`:
 
 ```zig
 //! 消息类型定义
-pub const TypeLogin: u8 = @intCast('o');       // 客户端登录
-pub const TypeLoginResp: u8 = @intCast('1');   // 服务端响应
-pub const TypeNewProxy: u8 = @intCast('p');    // 注册代理
-pub const TypeNewProxyResp: u8 = @intCast('2'); // 代理响应
+pub const TypeLogin: u8 = @intCast('o');
+pub const TypeLoginResp: u8 = @intCast('1');
+pub const TypeNewProxy: u8 = @intCast('p');
+pub const TypeNewProxyResp: u8 = @intCast('2');
+pub const TypeStartWorkConn: u8 = @intCast('s');
+pub const TypePing: u8 = @intCast('h');
+pub const TypePong: u8 = @intCast('4');
 
-// Login 消息结构
 pub const Login = struct {
     version: []const u8 = "",
     hostname: []const u8 = "",
@@ -188,7 +178,6 @@ pub const Login = struct {
     pool_count: u32 = 0,
 };
 
-// LoginResp 消息结构
 pub const LoginResp = struct {
     version: []const u8 = "",
     run_id: []const u8 = "",
@@ -198,124 +187,106 @@ pub const LoginResp = struct {
 
 ## 第四步：发送和接收消息
 
-添加消息 I/O 函数到 `src/msg.zig`：
+添加消息 I/O 辅助函数：
 
 ```zig
-//! 发送消息：类型 + 长度 + JSON
-pub fn sendMessage(conn: linux.fd_t, msg_type: u8, payload: anytype) !void {
-    var json_buf: [8192]u8 = undefined;
-    const serialized = std.json.stringifyBuf(payload, json_buf[0..], .{
-        .whitespace = .none
-    });
-    
-    // 写类型
-    var type_byte = msg_type;
-    _ = linux.write(conn, &type_byte, 1);
-    
-    // 写长度（4字节大端）
-    const len: u32 = @intCast(serialized.len);
-    var len_bytes: [4]u8 = .{
-        @as(u8, @intCast((len >> 24) & 0xFF)),
-        @as(u8, @intCast((len >> 16) & 0xFF)),
-        @as(u8, @intCast((len >> 8) & 0xFF)),
-        @as(u8, @intCast(len & 0xFF)),
-    };
-    _ = linux.write(conn, &len_bytes, 4);
-    
-    // 写 JSON
-    _ = linux.write(conn, @as([*]const u8, @ptrCast(serialized.ptr)), serialized.len);
+//! 构造消息：类型 + 长度 + JSON
+fn makeMessage(msg_type: u8, json_payload: []const u8) []u8 {
+    var msg: [8192]u8 = undefined;
+    msg[0] = msg_type;
+    const len: u32 = @intCast(json_payload.len);
+    msg[1] = @as(u8, @intCast((len >> 24) & 0xFF));
+    msg[2] = @as(u8, @intCast((len >> 16) & 0xFF));
+    msg[3] = @as(u8, @intCast((len >> 8) & 0xFF));
+    msg[4] = @as(u8, @intCast(len & 0xFF));
+    @memcpy(msg[5..5+json_payload.len], json_payload);
+    return msg[0..5+json_payload.len];
 }
 
-// 接收消息头（类型 + 长度）
-pub fn recvMessageHeader(conn: linux.fd_t) ![5]u8 {
+//! 接收消息
+fn recvMessage(sock: linux.fd_t) ![8192]u8 {
     var header: [5]u8 = undefined;
-    _ = linux.read(conn, &header, 5);
-    return header;
-}
-
-// 解析长度
-pub fn parseMsgLen(header: [5]u8) u32 {
-    return @as(u32, header[1]) << 24 |
-           @as(u32, header[2]) << 16 |
-           @as(u32, header[3]) << 8 |
-           @as(u32, header[4]);
+    const n = linux.read(sock, &header, 5);
+    if (n < 5) return error.Truncated;
+    
+    const msg_len = @as(u32, header[1]) << 24 |
+                    @as(u32, header[2]) << 16 |
+                    @as(u32, header[3]) << 8 |
+                    @as(u32, header[4]);
+    
+    var buf: [8192]u8 = undefined;
+    if (msg_len > 8191) return error.TooLarge;
+    
+    const body_n = linux.read(sock, &buf, msg_len);
+    if (body_n < msg_len) return error.Truncated;
+    
+    var result: [8192]u8 = undefined;
+    result[0] = header[0];
+    @memcpy(result[1..5], header[1..5]);
+    @memcpy(result[5..5+body_n], buf[0..body_n]);
+    return result;
 }
 ```
 
 ## 第五步：实现登录握手
 
-修改 `src/frpc_main.zig`，添加 Login 消息发送和响应接收：
+**客户端** - 发送 Login 并接收响应：
 
 ```zig
-const msg = @import("msg.zig");
+// 构造 Login JSON
+const login_json = "{\"version\":\"0.1.0-zig\",\"hostname\":\"zig-client\"," ++
+    "\"os\":\"Linux\",\"arch\":\"x86_64\",\"pool_count\":1}";
 
-pub fn main() void {
-    // ... 连接代码 ...
+// 发送
+const login_msg = makeMessage('o', login_json);
+_ = linux.write(sock, @as([*]const u8, @ptrCast(login_msg.ptr)), login_msg.len);
+std.debug.print("[*] Login sent...\n", .{});
 
-    // 发送 Login 消息
-    const login = msg.Login{
-        .version = "0.1.0-zig",
-        .hostname = "zig-client",
-        .os = @tagName(std.builtin.os.tag),
-        .arch = @tagName(std.builtin.cpu.arch),
-        .pool_count = 1,
-    };
-    msg.sendMessage(sock, msg.TypeLogin, login) catch |err| {
-        std.debug.print("[!] Login send failed: {}\n", .{err});
-        return;
-    };
-    std.debug.print("[*] Login sent\n", .{});
+// 接收响应
+const resp = recvMessage(sock) catch |err| {
+    std.debug.print("[!] Login response failed: {}\n", .{err});
+    return;
+};
 
-    // 接收 LoginResp
-    const header = msg.recvMessageHeader(sock) catch |err| {
-        std.debug.print("[!] LoginResp header failed: {}\n", .{err});
-        return;
-    };
-    
-    if (header[0] != msg.TypeLoginResp) {
-        std.debug.print("[!] Expected LoginResp, got: {c}\n", .{header[0]});
-        return;
-    }
-    
-    const len = msg.parseMsgLen(header);
-    var body: [1024]u8 = undefined;
-    _ = linux.read(sock, &body, len);
-    
+if (resp[0] == '1') {  // LoginResp
     std.debug.print("[+] Login SUCCESS!\n", .{});
 }
 ```
 
-## 第六步：配置文件解析
-
-创建 `src/config.zig` 解析 INI 格式配置：
+**服务端** - 接收 Login 并发送响应：
 
 ```zig
-//! INI 配置文件解析器
-pub const Config = struct {
-    common: CommonConfig = .{},
-    proxies: []ProxyConfig = &.{},
-};
+var buf: [8192]u8 = undefined;
+const n = linux.read(fd, &buf, buf.len);
+if (n > 0 and buf[0] == 'o') {
+    // 解析 Login 消息...
+    const login_resp = makeMessage('1', 
+        "{\"version\":\"0.1.0-zig\",\"run_id\":\"test123\",\"error_msg\":\"\"}");
+    _ = linux.write(fd, @as([*]const u8, @ptrCast(login_resp.ptr)), login_resp.len);
+    std.debug.print("[+] Login response sent\n", .{});
+}
+```
 
-pub const CommonConfig = struct {
-    server_addr: []const u8 = "127.0.0.1",
-    server_port: u16 = 7000,
-    pool_count: u32 = 1,
-    privilege_key: []const u8 = "",
-};
+## 第六步：消息分发
 
-pub const ProxyConfig = struct {
-    name: []const u8,
-    proxy_type: []const u8 = "tcp",
-    local_ip: []const u8 = "127.0.0.1",
-    local_port: u16 = 0,
-    remote_port: u16 = 0,
-};
+登录后进入主循环，处理不同类型的消息：
 
-pub fn parseConfig(content: []const u8) Config {
-    var config = Config{};
-    // 解析 [common] 和 [proxy_name] sections
-    // ...
-    return config;
+```zig
+while (true) {
+    const n = linux.read(fd, &buf, buf.len);
+    if (n <= 0) break;
+    
+    switch (buf[0]) {
+        'p' => { // NewProxy
+            const resp = makeMessage('2', "{\"proxy_name\":\"ssh\",\"error_msg\":\"\"}");
+            _ = linux.write(fd, @as([*]const u8, @ptrCast(resp.ptr)), resp.len);
+        },
+        'h' => { // Ping
+            const pong = makeMessage('4', "{\"error_msg\":\"\"}");
+            _ = linux.write(fd, @as([*]const u8, @ptrCast(pong.ptr)), pong.len);
+        },
+        else => {},
+    }
 }
 ```
 
@@ -323,27 +294,55 @@ pub fn parseConfig(content: []const u8) Config {
 
 ```bash
 # 编译
-zig build-exe -lc -OReleaseSafe src/frps_main.zig --name frps
-zig build-exe -lc -OReleaseSafe src/frpc_main.zig --name frpc
+zig build-exe -lc -OReleaseSafe src/server/main.zig --name frps
+zig build-exe -lc -OReleaseSafe src/client/main.zig --name frpc
 
 # 测试
 ./frps &
-# [+] Server listening on port 7000
+[+] Server listening on port 7000 (control)
 
 ./frpc
-# [+] Connected to 127.0.0.1:7000
-# [*] Login sent...
-# [+] Login SUCCESS!
+[+] Connected to 127.0.0.1:7000
+[*] Login sent...
+[+] Login SUCCESS!
+
+# 服务端日志
+[+] New connection from 16777343
+[*] Received 141 bytes, first byte: o
+[+] Login response sent
+[*] Message: h
+[*] Message: p
+```
+
+## 项目结构
+
+```
+zig-frp/
+├── src/
+│   ├── client/
+│   │   ├── main.zig       # frpc 主程序
+│   │   ├── proxy.zig      # 代理管理
+│   │   ├── work_conn.zig  # WorkConn 连接池
+│   │   ├── start_work_conn.zig  # StartWorkConn 处理
+│   │   └── xtcp.zig       # XTCP NAT 打洞
+│   ├── server/
+│   │   └── main.zig        # frps 主程序
+│   └── msg/
+│       ├── msg.zig         # 消息类型定义
+│       └── io.zig          # 消息 I/O 辅助函数
+└── build.zig
 ```
 
 ## 踩坑总结
 
-| 问题 | 解决方法 |
-|------|---------|
+| 问题 | 解决 |
+|------|------|
 | `std.net` API 变化 | 用 `linux` syscall 替代 |
-| `GeneralPurposeAllocator` 被移除 | 用 `linux.sockaddr.in` 等原生类型 |
-| socket 返回 usize 而非 fd_t | `@as(fd_t, @intCast(...))` |
-| `linux.write` 需要 `[*]const u8` | `@as([*]const u8, @ptrCast(ptr))` |
+| `GeneralPurposeAllocator` 被移除 | 用简单的栈分配或全局变量 |
+| `socket()` 返回 `usize` | `@as(fd_t, @intCast(...))` |
+| `linux.write()` 需要 `[*]const u8` | `@as([*]const u8, @ptrCast(ptr))` |
+| `linux.read()` 需要 `[*]u8` | `@as([*]u8, @ptrCast(&buf))` |
+| `@intCast` 需要显式类型 | 用 `@as(u32, ...)` 显式标注 |
 
 ## 完整代码
 
@@ -352,8 +351,8 @@ GitHub: [https://github.com/clawacq/zig-frp-v2](https://github.com/clawacq/zig-f
 ```bash
 git clone https://github.com/clawacq/zig-frp-v2
 cd zig-frp-v2
-zig build-exe -lc -OReleaseSafe src/frps_main.zig --name frps
-zig build-exe -lc -OReleaseSafe src/frpc_main.zig --name frpc
+zig build-exe -lc -OReleaseSafe src/server/main.zig --name frps
+zig build-exe -lc -OReleaseSafe src/client/main.zig --name frpc
 ./frps &
 ./frpc
 ```
@@ -364,4 +363,4 @@ zig build-exe -lc -OReleaseSafe src/frpc_main.zig --name frpc
 - 添加 TCP Proxy 端口映射
 - 实现 XTCP NAT 打洞
 
-代码在 GitHub 上，后续会持续更新。
+代码在 GitHub 上持续更新。
