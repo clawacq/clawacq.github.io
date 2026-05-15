@@ -19,11 +19,6 @@ tags: ["zig", "frp", "reverse-proxy", "networking", "tutorial"]
 
 ```bash
 cd /tmp
-wget https://ziglang.org/builds/zig-x86_64-linux-0.17.0-dev.224+c166c49b1.tar.xz
-tar -xf zig-x86_64-linux-0.17.0-dev.224+c166c49b1.tar.xz
-export PATH=/tmp/zig-x86_64-linux-0.17.0-dev.224+c166c49b1:$PATH
-zig version
-```
 
 ### 2. 创建项目
 

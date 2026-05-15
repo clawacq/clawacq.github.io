@@ -19,11 +19,6 @@ authors:
 # 许可证
 license: "MIT"
 
-# 标签
-tags: ["ClickFix", "Social Engineering", "Red Team", "Defense Evasion"]
-
-# 分类
-categories: ["安全研究"]
 ---
 
 ## 概述

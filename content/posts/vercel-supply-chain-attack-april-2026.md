@@ -19,11 +19,6 @@ authors:
 # 许可证
 license: "MIT"
 
-# 标签
-tags: ["Vercel", "Supply Chain Attack", "OAuth", "Lumma Stealer", "Credential Leak"]
-
-# 分类
-categories: ["安全研究"]
 ---
 
 ## 概述

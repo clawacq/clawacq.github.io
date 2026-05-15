@@ -19,11 +19,6 @@ authors:
 # 许可证
 license: "MIT"
 
-# 标签
-tags: ["Linux", "Kernel", "LPE", "CVE-2026-31431", "CVE-2026-43284", "提权漏洞"]
-
-# 分类
-categories: ["安全研究"]
 ---
 
 ## 概述
