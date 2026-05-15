@@ -60,18 +60,27 @@ categories: ["安全研究"]
 
 Context.ai 是一家 AI 可观测性工具厂商，其 Google Workspace OAuth 应用已被 Vercel 员工授权使用。
 
-攻击路径：
+### 初始感染：下载 Roblox 外挂中了 Lumma Stealer
+
+根据 HUDSON Rock 和 CyberScoop 的调查，Context.ai 的一名员工想要玩 Roblox 游戏外挂，在网上搜索并下载了"Roblox 漏洞利用脚本"。这个脚本表面上是游戏作弊工具，实际内嵌了 **Lumma Stealer** 窃密木马。
+
+这是一个非常经典的木马传播路径：
+
+1. **目标群体**：游戏玩家，特别是想用外挂的年轻用户
+2. **诱饵**：免费的 Roblox 漏洞利用脚本
+3. **实际载荷**：Lumma Stealer — 专门窃取浏览器凭据、Session Token、加密货币钱包、FTP 记录的窃密木马
+4. **传播渠道**：论坛、第三方下载站、YouTube 教程视频的链接
 
 ```
-Context.ai 员工下载 Roblox 漏洞脚本
+员工想要免费开挂
            ↓
-感染 Lumma Stealer 窃密木马
+去游戏论坛/第三方站下载"Roblox 漏洞利用脚本"
            ↓
-窃取：浏览器凭据 + Session Token + Google OAuth Token
+脚本里捆了 Lumma Stealer
            ↓
-攻击者进入 Context.ai AWS 环境
+执行后，浏览器凭据、Session、OAuth Token 全部被盗
            ↓
-窃取 OAuth Token（包含 Vercel 员工对应的 Token）
+数据上传到攻击者 C2 服务器
 ```
 
 ### Stage 2：OAuth 持久化访问（T1550.001）
